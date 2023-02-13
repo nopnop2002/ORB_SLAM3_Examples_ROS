@@ -1,7 +1,7 @@
 # ORB_SLAM3_Examples_ROS
 ORB_SLAM Examples ROS.   
 
-# Build ORB_LAM3
+# Build ORB_SLAM3
 ```
 $ git clone https://github.com/UZ-SLAMLab/ORB_SLAM3.git ORB_SLAM3
 $ chmod +x build.sh
