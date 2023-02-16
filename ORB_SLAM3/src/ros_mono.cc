@@ -47,6 +47,11 @@ public:
     ORB_SLAM3::System* mpSLAM;
 };
 
+ros::Publisher pub_pose;
+ros::Publisher pub_poseStamped;
+bool isFirst = true;
+cv::Mat cv_zero;
+
 int main(int argc, char **argv)
 {
     ros::init(argc, argv, "Mono");
@@ -67,6 +72,9 @@ int main(int argc, char **argv)
     ros::NodeHandle nodeHandler;
     ros::Subscriber sub = nodeHandler.subscribe("/camera/image_raw", 1, &ImageGrabber::GrabImage,&igb);
 
+	pub_pose = nodeHandler.advertise<geometry_msgs::Pose>("pose", 1000);
+	pub_poseStamped = nodeHandler.advertise<geometry_msgs::PoseStamped>("poseStamped", 1000);
+
     ros::spin();
 
     // Stop all threads
@@ -80,8 +88,91 @@ int main(int argc, char **argv)
     return 0;
 }
 
+// 以下を参考にした
+// https://github.com/appliedAI-Initiative/orb_slam_2_ros/blob/master/ros/src/Node.cc
+tf2::Transform TransformFromMat (cv::Mat position_mat) {
+  cv::Mat rotation(3,3,CV_32F);
+  cv::Mat translation(3,1,CV_32F);
+
+  rotation = position_mat.rowRange(0,3).colRange(0,3);
+  translation = position_mat.rowRange(0,3).col(3);
+
+
+  tf2::Matrix3x3 tf_camera_rotation (rotation.at<float> (0,0), rotation.at<float> (0,1), rotation.at<float> (0,2),
+									rotation.at<float> (1,0), rotation.at<float> (1,1), rotation.at<float> (1,2),
+									rotation.at<float> (2,0), rotation.at<float> (2,1), rotation.at<float> (2,2)
+								   );
+
+  tf2::Vector3 tf_camera_translation (translation.at<float> (0), translation.at<float> (1), translation.at<float> (2));
+
+  //Coordinate transformation matrix from orb coordinate system to ros coordinate system
+  const tf2::Matrix3x3 tf_orb_to_ros (0, 0, 1,
+									-1, 0, 0,
+									 0,-1, 0);
+
+  //Transform from orb coordinate system to ros coordinate system on camera coordinates
+  tf_camera_rotation = tf_orb_to_ros*tf_camera_rotation;
+  tf_camera_translation = tf_orb_to_ros*tf_camera_translation;
+
+  //Inverse matrix
+  tf_camera_rotation = tf_camera_rotation.transpose();
+  tf_camera_translation = -(tf_camera_rotation*tf_camera_translation);
+
+  //Transform from orb coordinate system to ros coordinate system on map coordinates
+  tf_camera_rotation = tf_orb_to_ros*tf_camera_rotation;
+  tf_camera_translation = tf_orb_to_ros*tf_camera_translation;
+
+  return tf2::Transform (tf_camera_rotation, tf_camera_translation);
+}
+
+geometry_msgs::Transform ConvertPositionToTransform (std_msgs::Header header, cv::Mat position) {
+	tf2::Transform tf_position = TransformFromMat(position);
+	//geometry_msgs::PoseStamped pose_msg;
+	geometry_msgs::Transform trans_msg;
+	//trans_msg.header = header;
+	trans_msg = tf2::toMsg(tf_position); 
+	//std::cout << "trans_msg=" << trans_msg << std::endl << std::endl;
+	return trans_msg;
+}
+
+geometry_msgs::TransformStamped ConvertPositionToTransformStamped (std_msgs::Header header, cv::Mat position, string child_frame_id) {
+	tf2::Transform tf_position = TransformFromMat(position);
+	//geometry_msgs::PoseStamped pose_msg;
+	geometry_msgs::TransformStamped trans_msg;
+	trans_msg.header = header;
+	trans_msg.transform = tf2::toMsg(tf_position); 
+	trans_msg.child_frame_id = child_frame_id;
+	//std::cout << "trans_msg=" << trans_msg << std::endl << std::endl;
+	return trans_msg;
+}
+
+/*
+bool areEqual(const cv::Mat& a, const cv::Mat& b) {
+    cv::Mat temp;
+    cv::bitwise_xor(a,b,temp); //It vectorizes well with SSE/NEON
+    return !(cv::countNonZero(temp) );
+}
+*/
+
+bool matIsEqual(const cv::Mat mat1, const cv::Mat mat2){
+    // treat two empty mat as identical as well
+    if (mat1.empty() && mat2.empty()) {
+        return true;
+    }
+    // if dimensionality of two mat is not identical, these two mat is not identical
+    if (mat1.cols != mat2.cols || mat1.rows != mat2.rows || mat1.dims != mat2.dims) {
+        return false;
+    }
+    cv::Mat diff;
+    cv::compare(mat1, mat2, diff, cv::CMP_NE);
+    int nz = cv::countNonZero(diff);
+    return nz==0;
+}
+
+
 void ImageGrabber::GrabImage(const sensor_msgs::ImageConstPtr& msg)
 {
+
     // Copy the ros image message to cv::Mat.
     cv_bridge::CvImageConstPtr cv_ptr;
     try
@@ -108,6 +199,51 @@ void ImageGrabber::GrabImage(const sensor_msgs::ImageConstPtr& msg)
 	cv::Mat cv_mat;
 	cv::eigen2cv(eigen_mat, cv_mat);
 	std::cout << "cv_mat=" << cv_mat << std::endl << std::endl;
+
+	if (isFirst) {
+		isFirst = false;
+		cv_zero = cv_mat;
+	}
+	std::cout << "cv_zero=" << cv_zero << std::endl << std::endl;
+	bool flag = matIsEqual(cv_mat, cv_zero);
+	std::cout << "flag=" << flag << std::endl << std::endl;
+
+/*
+	cv::Mat diff = cv_zero != cv_mat;
+	bool eq = cv::countNonZero(diff) == 0;
+	std::cout << "eq=" << eq << std::endl << std::endl;
+*/
+
+	//if (!cv_mat.empty()) {
+	if (!matIsEqual(cv_mat, cv_zero)) {
+		// Convert to geometry_msgs::Transform
+		geometry_msgs::Transform transform;
+		transform = ConvertPositionToTransform(cv_ptr->header, cv_mat);
+		//std::cout << "transform=" << transform << std::endl << std::endl;
+
+		// Convert to geometry_msgs::TransformStamped
+		geometry_msgs::TransformStamped transformStamped;
+		transformStamped = ConvertPositionToTransformStamped(cv_ptr->header, cv_mat, "/child");
+		//std::cout << "transformStamped=" << transformStamped << std::endl << std::endl;
+
+		// Build to geometry_msgs::Pose
+		geometry_msgs::Pose pose;
+		// Vector3.float64 --> Point.float64
+		pose.position.x = transform.translation.x;
+		pose.position.y = transform.translation.y; 
+		pose.position.z = transform.translation.z;
+		pose.orientation = transform.rotation;
+		std::cout << "pose=" << pose << std::endl << std::endl;
+
+		// Build to geometry_msgs::poseStamped
+		geometry_msgs::PoseStamped poseStamped;
+		poseStamped.header = transformStamped.header;
+		poseStamped.pose = pose;
+		std::cout << "poseStamped=" << poseStamped << std::endl << std::endl;
+
+		//pub_pose.publish(pose);
+		pub_poseStamped.publish(poseStamped);
+	}
 }
 
 
