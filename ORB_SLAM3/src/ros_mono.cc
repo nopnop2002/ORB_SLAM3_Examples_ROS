@@ -26,9 +26,14 @@
 #include<ros/ros.h>
 #include <cv_bridge/cv_bridge.h>
 
-#include<opencv2/core/core.hpp>
+#include <tf2/convert.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+
+#include <opencv2/core/core.hpp>
+#include <opencv2/core/eigen.hpp>
 
 #include"../../../include/System.h"
+
 
 using namespace std;
 
@@ -89,7 +94,20 @@ void ImageGrabber::GrabImage(const sensor_msgs::ImageConstPtr& msg)
         return;
     }
 
-    mpSLAM->TrackMonocular(cv_ptr->image,cv_ptr->header.stamp.toSec());
+    Sophus::SE3f SE3f = mpSLAM->TrackMonocular(cv_ptr->image,cv_ptr->header.stamp.toSec());
+	// https://github.com/strasdat/Sophus/issues/80
+	std::cout << "SE3f.matrix()=" << SE3f.matrix() << std::endl << std::endl;
+	std::cout << "SE3f.matrix()=" << typeid(SE3f.matrix()).name() << std::endl << std::endl;
+	//std::cout << "SE3f.unit_quaternion()=" << SE3f.unit_quaternion() << std::endl << std::endl;
+	//std::cout << "SE3f.log()=" << SE3f.log() << std::endl << std::endl;
+	Eigen::Matrix4f eigen_mat = SE3f.matrix();
+	std::cout << "eigen_mat" << eigen_mat<< std::endl << std::endl;
+
+	// Eigen::Matrixからcv::Matへの変換
+	// http://dronevisionml.blogspot.com/2015/07/opencv-mat-eigen.html
+	cv::Mat cv_mat;
+	cv::eigen2cv(eigen_mat, cv_mat);
+	std::cout << "cv_mat=" << cv_mat << std::endl << std::endl;
 }
 
 
